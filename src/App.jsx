@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
-  promptFor, generateOne, fetchImageBlob, clipCheck,
-  commonsSearch, wikiSearch, offSearch, openverseSearch, pexelsSearch,
-  buildQueries, nameScore, OFF_FIRST, orPickBest, orVerify, OR_FREE_VISION,
-  uploadImgbb, uploadGithub, ensureGhBranch,
+  promptFor, generateOne, fetchImageBlob, loadImageDims, dimsOk,
+  commonsSearch, wikiSearch, mealdbSearch, offSearch, openverseSearch, pexelsSearch, pixabaySearch,
+  buildQueries, OFF_FIRST,
+  uploadImgbb, uploadGithub, uploadR2, r2Test, ensureGhBranch,
   download, buildFinalSeed, sleep,
 } from './factory.js'
 import ITEMS from './data/items.json'
@@ -13,48 +13,45 @@ const LS_SET = 'gif3_settings_v1'
 const LS_MAP = 'gif3_map_v1'
 
 const DEFAULT_SETTINGS = {
-  provider: 'github',
+  provider: 'github',           // github (proven) | r2 (fast CDN) | imgbb (backup)
   ghPat: '', ghOwner: 'jackbhai', ghRepo: 'gharapp-image-factory',
   ghBranch: 'food-images', ghFolder: 'images/items',
+  r2AccountId: '', r2KeyId: '', r2Secret: '', r2Bucket: 'gharapp-images', r2Pub: '',
   imgbbKey: '',
   workers: 12, autoRounds: 3,
-  // --- search-first pipeline ---
-  onlineOn: true, aiOnly: false, minScore: 0.5,
-  srcCommons: true, srcWiki: true, srcOff: true, srcOpenverse: true, srcPexels: false,
-  pexelsKey: '',
-  clipVerify: false,
-  // --- OpenRouter vision selector ---
-  orKey: '', orModel: 'google/gemma-4-31b-it:free',
-  orSelect: true, orVerifyAI: false, maxCand: 4,
+  onlineOn: true, aiOnly: false, minScore: 0.5, minDim: 380,
+  srcCommons: true, srcWiki: true, srcMeal: true, srcOpenverse: true, srcOff: false,
+  srcPexels: false, pexelsKey: '',
+  srcPixabay: false, pixabayKey: '',
 }
 
 const loadLS = (k, d) => { try { return { ...d, ...JSON.parse(localStorage.getItem(k) || '{}') } } catch { return d } }
 const fmtClock = (t) => new Date(t).toLocaleTimeString('en-IN', { hour12: false })
 const fmtDur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s` }
-const SRC_ICON = { commons: '🌐', wikipedia: '📖', openfoodfacts: '🥫', openverse: '🖼', pexels: '📷', ai: '🎨' }
+const SRC_ICON = { commons: '🌐', wikipedia: '📖', mealdb: '🍛', openfoodfacts: '🥫', openverse: '🖼', pexels: '📷', pixabay: '📸', ai: '🎨' }
 
 export default function App() {
   const [tab, setTab] = useState('dash')
   const [settings, setSettings] = useState(() => loadLS(LS_SET, DEFAULT_SETTINGS))
   const [completedAt, setCompletedAt] = useState(null)
+  const [r2Testing, setR2Testing] = useState(false)
   const [, setTick] = useState(0)
 
   const mapRef = useRef(loadLS(LS_MAP, {}))
-  const metaRef = useRef({})        // id -> {src, via}
-  const failRef = useRef({})        // id -> msg
-  const rejectRef = useRef({})      // id -> true (manual reject -> AI regen)
+  const metaRef = useRef({})
+  const failRef = useRef({})
+  const rejectRef = useRef({})
   const logRef = useRef([])
   const wallRef = useRef([])
   const inflightRef = useRef(new Map())
-  const srcCountRef = useRef({})    // source -> count
-  const orCountRef = useRef({ picks: 0, verifies: 0, orRejected: 0 })
+  const srcCountRef = useRef({})
+  const qualityRef = useRef({ dimReject: 0, fetchFail: 0, candidates: 0 })
   const speedRef = useRef([])
   const histRef = useRef([])
-  const deadRef = useRef({})        // src -> dead-until ts
+  const deadRef = useRef({})
   const runRef = useRef({ running: false, stopFlag: false, round: 0, startedAt: 0, cooldownUntil: 0 })
   const ptrRef = useRef(0)
   const queueRef = useRef([])
-
   const settingsRef = useRef(settings)
   settingsRef.current = settings
 
@@ -62,12 +59,10 @@ export default function App() {
     logRef.current.push({ t: Date.now(), msg, kind })
     if (logRef.current.length > 800) logRef.current.splice(0, logRef.current.length - 800)
   }
-
   useEffect(() => { const iv = setInterval(() => setTick((x) => x + 1), 500); return () => clearInterval(iv) }, [])
   useEffect(() => { localStorage.setItem(LS_SET, JSON.stringify(settings)) }, [settings])
   const setS = (k, v) => setSettings((s) => ({ ...s, [k]: v }))
 
-  // ---- stats (tick pe fresh) ----
   const total = ITEMS.length
   let done = 0
   for (const it of ITEMS) if (mapRef.current[it.id]) done++
@@ -84,16 +79,14 @@ export default function App() {
   const pct = (done / total) * 100
 
   const saveMap = () => { localStorage.setItem(LS_MAP, JSON.stringify(mapRef.current)) }
-
-  // ---------------- per-item pipeline ----------------
   const alive = (src) => (deadRef.current[src] || 0) < Date.now()
   const markDead = (src, why) => { deadRef.current[src] = Date.now() + 120000; log(`🚧 ${src} throttled (${why}) — 2 min timeout`, 'cool') }
 
+  // ---------------- per-item pipeline ----------------
   async function processOne(item, wid) {
     const s = settingsRef.current
     const st = (stage) => inflightRef.current.set(item.id, { stage, name: item.name, wid })
 
-    // ===== STEP 1: ONLINE REAL PHOTOS =====
     if (s.onlineOn && !s.aiOnly && !rejectRef.current[item.id]) {
       st('🔎 search')
       const qs = buildQueries(item)
@@ -105,75 +98,41 @@ export default function App() {
       }
       const offFirst = OFF_FIRST.test(item.cat || '') || OFF_FIRST.test(item.name)
       if (offFirst && s.srcOff) await trySrc('openfoodfacts', offSearch(qs, thr))
+      if (item.ft === 'cooked' && s.srcMeal) await trySrc('mealdb', mealdbSearch(qs, thr))
       if (s.srcCommons) await trySrc('commons', commonsSearch(qs, thr))
       if (s.srcWiki) await trySrc('wikipedia', wikiSearch(qs, thr))
-      if (!cand.length && !offFirst && s.srcOff) await trySrc('openfoodfacts', offSearch(qs, thr))
       if (!cand.length && s.srcOpenverse) await trySrc('openverse', openverseSearch(qs, thr))
+      if (!cand.length && !offFirst && s.srcOff) await trySrc('openfoodfacts', offSearch(qs, thr))
       if (!cand.length && s.srcPexels && s.pexelsKey) await trySrc('pexels', pexelsSearch(qs, s.pexelsKey, thr))
+      if (!cand.length && s.srcPixabay && s.pixabayKey) await trySrc('pixabay', pixabaySearch(qs, s.pixabayKey, thr))
 
       const seen = new Set()
-      let uniq = cand.filter((c) => !seen.has(c.url) && seen.add(c.url)).sort((a, b) => b.score - a.score).slice(0, Math.max(2, s.maxCand || 4))
-
-      // 🧠 OpenRouter vision: multiple candidates me se BEST 1
-      if (uniq.length >= 2 && s.orKey.trim() && s.orSelect && alive('openrouter')) {
-        st('🧠 best pick')
-        try {
-          const { best, why } = await orPickBest(item, uniq.slice(0, 4), s.orKey.trim(), s.orModel.trim())
-          orCountRef.current.picks++
-          if (best === 0) {
-            log(`🧠 ${item.name}: vision ne koi match nahi mana (${why}) → AI se banayenge`, 'warn')
-            uniq = []
-          } else {
-            const chosen = uniq[best - 1]
-            uniq = [chosen, ...uniq.filter((c) => c !== chosen)]
-            log(`🧠 ${item.name}: vision picked #${best} — ${String(chosen.title).slice(0, 44)} (${why})`, 'ok')
-          }
-        } catch (e) {
-          if (e.orDead) markDead('openrouter', e.message)
-          else log(`🧠 vision fail (${e.message}) — score order se chalenge`, 'warn')
-        }
-      }
-
+      const uniq = cand.filter((c) => !seen.has(c.url) && seen.add(c.url)).sort((a, b) => b.score - a.score).slice(0, 5)
       for (const c of uniq) {
+        st('📏 quality')
+        qualityRef.current.candidates++
+        const d = await loadImageDims(c.url)
+        if (!dimsOk(d, s.minDim)) {
+          qualityRef.current.dimReject++
+          log(`📏 ${item.name}: "${String(c.title).slice(0, 36)}" reject (${d ? d.w + 'x' + d.h + ' — chhoti/stretched' : 'load fail'})`, 'warn')
+          continue
+        }
         st('🪞 fetch')
-        try {
-          const blob = await fetchImageBlob(c.url)
-          return { blob, src: c.source, via: c.title }
-        } catch { /* CORS/size fail -> next */ }
+        const blob = await fetchImageBlob(c.url)
+        if (blob) return { blob, src: c.source, via: c.title }
+        qualityRef.current.fetchFail++
       }
-      if (uniq.length) log(`🔎 ${item.name}: candidates mile par fetch nahi hua — AI se banayenge`, 'warn')
+      if (uniq.length) log(`🔎 ${item.name}: quality gate ke baad kuch nahi bacha — AI banayega`, 'warn')
     }
 
-    // ===== STEP 2: AI GENERATION (enhanced prompt + optional vision verify) =====
-    const orVerifyOn = s.orKey.trim() && s.orVerifyAI
-    const maxShots = (s.clipVerify || orVerifyOn) ? 2 : 1
-    for (let shot = 1; shot <= maxShots; shot++) {
-      st('🎨 AI gen')
-      const prompt = promptFor(item)
-      const gen = await generateOne(prompt, 3, (a, e) => log(`⚠️ W${wid} ${item.name}: retry ${a} (${e})`, 'warn'))
-      st('🪞 fetch')
-      const blob = await fetchImageBlob(gen.imageUrl)
-      let ok = true
-      if (orVerifyOn && alive('openrouter')) {
-        st('🧠 verify')
-        try {
-          ok = await orVerify(item, gen.imageUrl, s.orKey.trim(), s.orModel.trim())
-          orCountRef.current.verifies++
-          if (!ok) orCountRef.current.orRejected++
-        } catch (e) {
-          if (e.orDead) markDead('openrouter', e.message)
-          else log(`🧠 verify call fail: ${e.message}`, 'warn')
-          ok = true // call fail ho to image accept (pipeline na ruke)
-        }
-      }
-      if (ok && s.clipVerify) {
-        st('🧠 clip verify')
-        ok = await clipCheck(blob, item.name, log)
-      }
-      if (ok) return { blob, src: 'ai', via: 'pixelster flux' }
-      log(`🧠 ${item.name}: verify fail (shot ${shot}/${maxShots})${shot < maxShots ? ' — dobara banayenge' : ''}`, 'warn')
-    }
-    throw new Error('vision verify reject — next round me phir try hoga')
+    // ===== AI fallback (enhanced prompt) =====
+    st('🎨 AI gen')
+    const prompt = promptFor(item)
+    const gen = await generateOne(prompt, 3, (a, e) => log(`⚠️ W${wid} ${item.name}: retry ${a} (${e})`, 'warn'))
+    st('🪞 fetch')
+    const blob = await fetchImageBlob(gen.imageUrl, true)
+    if (!blob) throw new Error('generated image download fail')
+    return { blob, src: 'ai', via: 'pixelster flux' }
   }
 
   async function workerLoop(wid) {
@@ -189,8 +148,9 @@ export default function App() {
       try {
         const r = await processOne(item, wid)
         inflightRef.current.set(item.id, { stage: '☁️ upload', name: item.name, wid })
-        const finalUrl = settingsRef.current.provider === 'github'
-          ? await uploadGithub(ghCfg(), item, r.blob)
+        const pv = settingsRef.current.provider
+        const finalUrl = pv === 'github' ? await uploadGithub(ghCfg(), item, r.blob)
+          : pv === 'r2' ? await uploadR2(r2Cfg(), item, r.blob)
           : await uploadImgbb(r.blob, item.id, settingsRef.current.imgbbKey)
         mapRef.current[item.id] = finalUrl
         metaRef.current[item.id] = { src: r.src }
@@ -199,7 +159,7 @@ export default function App() {
         wallRef.current.unshift({ id: item.id, name: item.name, url: finalUrl, src: r.src, at: Date.now() })
         if (wallRef.current.length > 120) wallRef.current.length = 120
         delete failRef.current[item.id]
-        log(`${SRC_ICON[r.src] || '✅'} ${item.name} ← ${r.src} (${r.via.slice(0, 48)})`, 'ok')
+        log(`${SRC_ICON[r.src] || '✅'} ${item.name} ← ${r.src} (${String(r.via).slice(0, 48)})`, 'ok')
         if (speedRef.current.length % 10 === 0) saveMap()
       } catch (e) {
         const msg = String(e.message || e)
@@ -217,11 +177,26 @@ export default function App() {
     const s = settingsRef.current
     return { pat: s.ghPat.trim(), owner: s.ghOwner.trim(), repo: s.ghRepo.trim(), branch: s.ghBranch.trim(), folder: s.ghFolder.trim().replace(/^\/+|\/+$/g, '') }
   }
+  const r2Cfg = () => {
+    const s = settingsRef.current
+    return { accountId: s.r2AccountId.trim(), keyId: s.r2KeyId.trim(), secret: s.r2Secret.trim(), bucket: s.r2Bucket.trim(), pub: s.r2Pub.trim() }
+  }
+
+  async function testR2() {
+    const c = r2Cfg()
+    if (!c.accountId || !c.keyId || !c.secret || !c.bucket || !c.pub) { log('⛔ R2 ke saare 5 fields bharo (Account ID, Key ID, Secret, Bucket, Public URL)', 'err'); return }
+    setR2Testing(true)
+    log('🧪 R2 connection test…', 'info')
+    try { await r2Test(c); log('✅ R2 PERFECT — upload + public URL dono chal rahe hain! 🚀', 'big') }
+    catch (e) { log('❌ R2 test: ' + e.message, 'err') }
+    setR2Testing(false)
+  }
 
   async function startRun() {
     const s = settings
     if (running) return
-    if (s.provider === 'github' && !s.ghPat.trim()) { log('⛔ GitHub PAT paste karo (sirf localStorage me rahega)', 'err'); return }
+    if (s.provider === 'github' && !s.ghPat.trim()) { log('⛔ GitHub PAT paste karo', 'err'); return }
+    if (s.provider === 'r2' && (!s.r2KeyId.trim() || !s.r2Secret.trim() || !s.r2Pub.trim())) { log('⛔ R2 fields + pehle "Test R2" dabao', 'err'); return }
     if (s.provider === 'imgbb' && !s.imgbbKey.trim()) { log('⛔ imgbb key paste karo', 'err'); return }
     if (s.provider === 'github') {
       log(`🔐 GitHub: ${s.ghOwner}/${s.ghRepo} @ ${s.ghBranch}…`)
@@ -232,7 +207,7 @@ export default function App() {
     ptrRef.current = 0
     for (const k of Object.keys(failRef.current)) if (mapRef.current[k]) delete failRef.current[k]
     runRef.current = { running: true, stopFlag: false, round: runRef.current.round + 1, startedAt: Date.now(), cooldownUntil: 0 }
-    log(`🚀 Round ${runRef.current.round} — ${queueRef.current.length} items · ${s.workers} workers · search-first: ${s.onlineOn && !s.aiOnly ? 'ON 🌐' : 'OFF'} · host: ${s.provider}`, 'big')
+    log(`🚀 Round ${runRef.current.round} — ${queueRef.current.length} items · ${s.workers} workers · host: ${s.provider} · quality gate: ≥${s.minDim}px`, 'big')
     await Promise.all(Array.from({ length: s.workers }, (_, w) => workerLoop(w + 1)))
     saveMap()
     const left = ITEMS.filter((it) => !mapRef.current[it.id]).length
@@ -244,29 +219,23 @@ export default function App() {
     }
     runRef.current.running = false
     saveMap()
-    if (left === 0) {
-      log('🎉🎉 ALL IMAGES COMPLETE! Auto-export…', 'big')
-      setCompletedAt(Date.now())
-      exportAll()
-    } else log(`⏹ stop — ${left} baaki (${failCount} failed)`, 'warn')
+    if (left === 0) { log('🎉🎉 ALL IMAGES COMPLETE! Auto-export…', 'big'); setCompletedAt(Date.now()); exportAll() }
+    else log(`⏹ stop — ${left} baaki (${failCount} failed)`, 'warn')
   }
 
-  const stopRun = () => { runRef.current.stopFlag = true; saveMap(); log('⏸ Stop signal — current items khatam hoke rukenge', 'cool') }
+  const stopRun = () => { runRef.current.stopFlag = true; saveMap(); log('⏸ Stop signal…', 'cool') }
   const resetFails = () => { failRef.current = {}; log('🔄 fails clear', 'info') }
   const hardReset = () => {
-    if (!confirm('Browser-side progress delete? (GitHub pe jo upload ho chuki wo safe rahegi)')) return
+    if (!confirm('Browser-side progress delete? (jo upload ho chuka wo safe hai)')) return
     localStorage.removeItem(LS_MAP); mapRef.current = {}; metaRef.current = {}; failRef.current = {}; rejectRef.current = {}; wallRef.current = []; srcCountRef.current = {}
-    log('🧹 full reset — 0 se shuru', 'warn')
+    log('🧹 full reset', 'warn')
   }
-
   const rejectImage = (id) => {
     const it = ITEMS.find((x) => x.id === id)
-    delete mapRef.current[id]
-    rejectRef.current[id] = true
-    saveMap()
-    log(`👎 ${it?.name || id} reject — next run pe AI se dobara banegi`, 'warn')
+    delete mapRef.current[id]; rejectRef.current[id] = true; saveMap()
+    log(`👎 ${it?.name || id} reject — next run pe dobara banegi`, 'warn')
   }
-  const unreject = (id) => { delete rejectRef.current[id]; log(`👍 ${ITEMS.find((x) => x.id === id)?.name} un-reject`, 'info') }
+  const unreject = (id) => { delete rejectRef.current[id]; log(`👍 un-reject`, 'info') }
 
   async function exportAll() {
     try {
@@ -285,13 +254,12 @@ export default function App() {
   return (
     <div className="app">
       <div className="orb o1" /><div className="orb o2" /><div className="orb o3" />
-
       <header className="hdr fadeUp">
         <div className="brand">
           <span className="logo">⚡</span>
           <div>
-            <h1>GharApp Image Factory <span className="vtag">v2</span></h1>
-            <div className="sub">🌐 real-photo search + 🎨 enhanced AI → permanent GitHub CDN · {total.toLocaleString('en-IN')} items · 0 se fresh start</div>
+            <h1>GharApp Image Factory <span className="vtag">v3</span></h1>
+            <div className="sub">🌐 quality-checked real photos (≥{settings.minDim}px) + 🎨 AI fallback → {settings.provider === 'r2' ? '⚡ Cloudflare R2 CDN' : settings.provider === 'github' ? 'GitHub + jsDelivr CDN' : 'imgbb'} · {total.toLocaleString('en-IN')} items</div>
           </div>
         </div>
         <div className="hdrRight">
@@ -313,11 +281,11 @@ export default function App() {
           <div className="statGrid">
             <Stat label="TOTAL ITEMS" value={total} icon="🍱" />
             <Stat label="DONE" value={done} icon="✅" accent="green" />
-            <Stat label="🌐 ONLINE PHOTOS" value={onlineFound} icon="🌐" accent="blue" sub="real photos — free & fast" />
-            <Stat label="🎨 AI GENERATED" value={aiGen} icon="🎨" accent="purple" sub="enhanced prompts" />
+            <Stat label="🌐 ONLINE PHOTOS" value={onlineFound} icon="🌐" accent="blue" sub="quality-checked real" />
+            <Stat label="🎨 AI GENERATED" value={aiGen} icon="🎨" accent="purple" />
             <Stat label="PENDING" value={remain} icon="⏳" accent="amber" />
             <Stat label="SPEED" value={0} icon="🚄" accent="blue" text={perMin ? `${perMin}/min` : '—'} sub={running && etaMin ? `ETA ~${fmtDur(etaMin * 60000)}` : ''} />
-            <Stat label="FAILED" value={failCount} icon="❌" accent="red" sub={rejectCount ? `👎 ${rejectCount} manual reject` : ''} />
+            <Stat label="QUALITY REJECTS" value={qualityRef.current.dimReject} icon="📏" accent="red" sub={`bekar/chhoti roki · fetch-fail ${qualityRef.current.fetchFail}`} />
           </div>
 
           <div className="progressWrap fadeUp" style={{ animationDelay: '.1s' }}>
@@ -333,17 +301,13 @@ export default function App() {
               <h2>👷 Workers <span className="liveN">{inflightRef.current.size} active</span></h2>
               <div className="wgrid">
                 {[...inflightRef.current.entries()].slice(0, 16).map(([id, w]) => (
-                  <div key={id} className="wtile">
-                    <span className="wstage">{w.stage}</span>
-                    <span className="wname">{w.name}</span>
-                    <span className="wid">W{w.wid}</span>
-                  </div>
+                  <div key={id} className="wtile"><span className="wstage">{w.stage}</span><span className="wname">{w.name}</span><span className="wid">W{w.wid}</span></div>
                 ))}
                 {inflightRef.current.size === 0 && <p className="muted">Start dabao — yahan har worker live dikhega 🔥</p>}
               </div>
             </section>
             <section className="panel">
-              <h2>📈 Speed graph <span className="muted">(img/min)</span></h2>
+              <h2>📈 Speed <span className="muted">(img/min)</span></h2>
               <Sparkline histRef={histRef} perMin={perMin} running={running} />
               <div className="srcBreak">
                 {Object.entries(srcCounts).map(([k, v]) => <span key={k} className="chipLive">{SRC_ICON[k] || '•'} {k}: <b>{v}</b></span>)}
@@ -360,16 +324,21 @@ export default function App() {
                 <div className="providers">
                   <label className={`prov ${settings.provider === 'github' ? 'on' : ''}`}>
                     <input type="radio" checked={settings.provider === 'github'} onChange={() => setS('provider', 'github')} />
-                    <div className="provTitle">GitHub + jsDelivr <span className="reco">PERMANENT · NO RATE LIMIT</span></div>
-                    <div className="provDesc">Images tumhare repo <b>{settings.ghRepo}@{settings.ghBranch}</b> me commit → CDN se serve. 5000 req/h API limit — humein ~{total} hi chahiye ✅</div>
+                    <div className="provTitle">🐙 GitHub + jsDelivr <span className="reco">PROVEN · PERMANENT</span></div>
+                    <div className="provDesc">Tumhare repo <b>{settings.ghRepo}@{settings.ghBranch}</b> me commit → CDN. 5000 req/h — safe ✅</div>
+                  </label>
+                  <label className={`prov ${settings.provider === 'r2' ? 'on' : ''}`}>
+                    <input type="radio" checked={settings.provider === 'r2'} onChange={() => setS('provider', 'r2')} />
+                    <div className="provTitle">⚡ Cloudflare R2 <span className="reco2">FASTEST CDN · beta</span></div>
+                    <div className="provDesc">Tumhara Cloudflare bucket — zero rate limits, instant URLs, world-class speed. Pehle <b>Test R2</b> zaroor dabao.</div>
                   </label>
                   <label className={`prov ${settings.provider === 'imgbb' ? 'on' : ''}`}>
                     <input type="radio" checked={settings.provider === 'imgbb'} onChange={() => setS('provider', 'imgbb')} />
-                    <div className="provTitle">imgbb <span className="warn2">per-key rate cap</span></div>
-                    <div className="provDesc">Backup host. Key ka din-limit laga hua ho sakta hai.</div>
+                    <div className="provTitle">☁️ imgbb <span className="warn2">per-key rate cap</span></div>
+                    <div className="provDesc">Backup only.</div>
                   </label>
                 </div>
-                {settings.provider === 'github' ? (
+                {settings.provider === 'github' && (
                   <div className="fieldGrid">
                     <Field label="GitHub PAT (repo scope)" type="password" value={settings.ghPat} onChange={(v) => setS('ghPat', v)} ph="ghp_… localStorage only" />
                     <Field label="Owner" value={settings.ghOwner} onChange={(v) => setS('ghOwner', v)} />
@@ -377,48 +346,48 @@ export default function App() {
                     <Field label="Branch" value={settings.ghBranch} onChange={(v) => setS('ghBranch', v)} />
                     <Field label="Folder" value={settings.ghFolder} onChange={(v) => setS('ghFolder', v)} />
                   </div>
-                ) : (
+                )}
+                {settings.provider === 'r2' && (
+                  <div className="r2Box">
+                    <div className="fieldGrid">
+                      <Field label="Account ID" value={settings.r2AccountId} onChange={(v) => setS('r2AccountId', v)} ph="c15af85b…" />
+                      <Field label="Access Key ID" type="password" value={settings.r2KeyId} onChange={(v) => setS('r2KeyId', v)} />
+                      <Field label="Secret Access Key" type="password" value={settings.r2Secret} onChange={(v) => setS('r2Secret', v)} />
+                      <Field label="Bucket name" value={settings.r2Bucket} onChange={(v) => setS('r2Bucket', v)} ph="gharapp-images" />
+                      <Field label="Public URL (pub-****.r2.dev)" value={settings.r2Pub} onChange={(v) => setS('r2Pub', v)} ph="https://pub-xxxxxxxx.r2.dev" />
+                    </div>
+                    <button className="btn ghost" disabled={r2Testing} onClick={testR2}>{r2Testing ? '⏳ testing…' : '🧪 Test R2 connection'}</button>
+                    <p className="note">ℹ️ Bucket pehli baar: Cloudflare dashboard → R2 → <b>Create bucket</b> (gharapp-images) → Settings → Public access <b>allow</b> (r2.dev) → jo pub-***.r2.dev mile wo upar paste karo.</p>
+                  </div>
+                )}
+                {settings.provider === 'imgbb' && (
                   <div className="fieldGrid"><Field label="imgbb key" type="password" value={settings.imgbbKey} onChange={(v) => setS('imgbbKey', v)} /></div>
                 )}
               </div>
               <div>
-                <h3>🧠 Pipeline (accuracy + speed)</h3>
-                <label className="switch"><input type="checkbox" checked={settings.onlineOn} onChange={(e) => setS('onlineOn', e.target.checked)} /><span>🌐 Online real-photo search <b>pehle</b> (accuracy↑ time↓)</span></label>
+                <h3>🧠 Pipeline — QUALITY first</h3>
+                <label className="switch"><input type="checkbox" checked={settings.onlineOn} onChange={(e) => setS('onlineOn', e.target.checked)} /><span>🌐 Online real-photo search (dimension-gate ke saath)</span></label>
                 <div className="srcToggles">
                   <label className="switch sm"><input type="checkbox" checked={settings.srcCommons} onChange={(e) => setS('srcCommons', e.target.checked)} /><span>Wikimedia Commons</span></label>
                   <label className="switch sm"><input type="checkbox" checked={settings.srcWiki} onChange={(e) => setS('srcWiki', e.target.checked)} /><span>Wikipedia</span></label>
-                  <label className="switch sm"><input type="checkbox" checked={settings.srcOff} onChange={(e) => setS('srcOff', e.target.checked)} /><span>OpenFoodFacts (packaged)</span></label>
+                  <label className="switch sm"><input type="checkbox" checked={settings.srcMeal} onChange={(e) => setS('srcMeal', e.target.checked)} /><span>TheMealDB (cooked dishes)</span></label>
                   <label className="switch sm"><input type="checkbox" checked={settings.srcOpenverse} onChange={(e) => setS('srcOpenverse', e.target.checked)} /><span>Openverse (backup)</span></label>
-                  <label className="switch sm"><input type="checkbox" checked={settings.srcPexels} onChange={(e) => setS('srcPexels', e.target.checked)} /><span>Pexels (key chahiye)</span></label>
+                  <label className="switch sm"><input type="checkbox" checked={settings.srcOff} onChange={(e) => setS('srcOff', e.target.checked)} /><span>OpenFoodFacts (bekar quality isliye default OFF)</span></label>
+                  <label className="switch sm"><input type="checkbox" checked={settings.srcPexels} onChange={(e) => setS('srcPexels', e.target.checked)} /><span>Pexels (free key)</span></label>
+                  <label className="switch sm"><input type="checkbox" checked={settings.srcPixabay} onChange={(e) => setS('srcPixabay', e.target.checked)} /><span>Pixabay (free key, 100 req/min)</span></label>
                 </div>
-                {settings.srcPexels && <Field label="Pexels API key (optional)" type="password" value={settings.pexelsKey} onChange={(v) => setS('pexelsKey', v)} ph="200 req/hr free — pexels.com/api" />}
+                {settings.srcPexels && <Field label="Pexels API key" type="password" value={settings.pexelsKey} onChange={(v) => setS('pexelsKey', v)} ph="pexels.com/api — free" />}
+                {settings.srcPixabay && <Field label="Pixabay API key" type="password" value={settings.pixabayKey} onChange={(v) => setS('pixabayKey', v)} ph="pixabay.com/api/docs — free" />}
                 <div className="sliderBox">
-                  <label>Match strictness: <b>{Math.round(settings.minScore * 100)}%</b> <span className="muted">(kitna exact naam match chahiye)</span></label>
+                  <label>Name-match strictness: <b>{Math.round(settings.minScore * 100)}%</b></label>
                   <input type="range" min="0.4" max="0.8" step="0.05" value={settings.minScore} onChange={(e) => setS('minScore', +e.target.value)} />
                 </div>
-                <label className="switch"><input type="checkbox" checked={settings.aiOnly} onChange={(e) => setS('aiOnly', e.target.checked)} /><span>🎨 Sirf AI generation (online search skip)</span></label>
-                <label className="switch"><input type="checkbox" checked={settings.clipVerify} onChange={(e) => setS('clipVerify', e.target.checked)} /><span>🧠 AI-verify images (browser CLIP, slow first load ~100MB)</span></label>
-                <label className="switch sm">Jo online na mile → <b>enhanced descriptor prompt</b> se AI banayega (bekar image nahi banegi)</label>
-
-                <div className="orBox">
-                  <h3>🧠 OpenRouter Vision — PERFECT-1 picker</h3>
-                  <label className="switch"><input type="checkbox" checked={settings.orSelect} onChange={(e) => setS('orSelect', e.target.checked)} />
-                    <span>Multiple online images me se <b>vision-LLM se best 1</b> chunwao (jo match na kare unhe reject karke AI banwayega)</span></label>
-                  <label className="switch"><input type="checkbox" checked={settings.orVerifyAI} onChange={(e) => setS('orVerifyAI', e.target.checked)} />
-                    <span>AI-generated images ko bhi <b>vision se verify</b> karo (galat ho to 1 aur shot)</span></label>
-                  <div className="fieldGrid">
-                    <Field label="OpenRouter API key" type="password" value={settings.orKey} onChange={(v) => setS('orKey', v)} ph="sk-or-… openrouter.ai/keys" />
-                    <label className="field"><span>Vision model (free wale recommended)</span>
-                      <input list="orModels" value={settings.orModel} onChange={(e) => setS('orModel', e.target.value)} autoComplete="off" />
-                      <datalist id="orModels">{OR_FREE_VISION.map((m) => <option key={m} value={m} />)}</datalist>
-                    </label>
-                  </div>
-                  <div className="sliderBox">
-                    <label>Max candidates vision ko bhejo: <b>{settings.maxCand}</b> <span className="muted">(2–5)</span></label>
-                    <input type="range" min="2" max="5" value={settings.maxCand} onChange={(e) => setS('maxCand', +e.target.value)} />
-                  </div>
-                  <p className="note">ℹ️ Free tier: ~50 req/day (no credit) / 1000 req/day ($10 credit). Quota khatam → auto-fallback, pipeline <b>kabhi nahi rukti</b>. 🧠 picks: <b>{orCountRef.current.picks}</b> · verifies: <b>{orCountRef.current.verifies}</b> · OR-rejects: <b>{orCountRef.current.orRejected}</b></p>
+                <div className="sliderBox">
+                  <label>📏 Min image size: <b>{settings.minDim}px</b> <span className="muted">(chhoti=auto reject)</span></label>
+                  <input type="range" min="300" max="600" step="20" value={settings.minDim} onChange={(e) => setS('minDim', +e.target.value)} />
                 </div>
+                <label className="switch"><input type="checkbox" checked={settings.aiOnly} onChange={(e) => setS('aiOnly', e.target.checked)} /><span>🎨 Sirf AI generation (online search skip)</span></label>
+                <p className="note">⚠️ BigBasket/Blinkit static site se scrape <b>nahi ho sakta</b> (CORS + login-session + Cloudflare bot-protection) — isliye unke jaisi clean product shots quality-gate + enhanced AI combos se banti hain.</p>
               </div>
             </div>
             <div className="rowCtrls">
@@ -427,14 +396,12 @@ export default function App() {
                 <input type="range" min="2" max="24" value={settings.workers} onChange={(e) => setS('workers', +e.target.value)} />
               </div>
               <div className="btns">
-                {!running
-                  ? <button className="btn go" onClick={startRun}>▶ START {done > 0 ? 'RESUME' : '(0 se)'}</button>
-                  : <button className="btn stop" onClick={stopRun}>⏸ STOP</button>}
+                {!running ? <button className="btn go" onClick={startRun}>▶ START {done > 0 ? 'RESUME' : ''}</button> : <button className="btn stop" onClick={stopRun}>⏸ STOP</button>}
                 <button className="btn ghost" onClick={resetFails}>🔄 Reset fails</button>
                 <button className="btn ghost" onClick={hardReset}>🧹 Hard reset</button>
               </div>
             </div>
-            <p className="note">💾 har 10 images pe autosave · 👎 Explorer me reject karo to wo AI se dobara banegi · 100% pe auto-export</p>
+            <p className="note">💾 har 10 images pe autosave · 👎 Explorer reject → regen · 100% pe auto-export</p>
           </section>
 
           <LogTail logRef={logRef} />
@@ -443,7 +410,7 @@ export default function App() {
 
       {tab === 'wall' && (
         <main className="fadeUp">
-          <h2 className="pg">🖼 Live Wall <span className="muted">🌐 online · 🎨 AI</span></h2>
+          <h2 className="pg">🖼 Live Wall</h2>
           {wallRef.current.length === 0 && <p className="muted">Abhi kuch nahi — Start dabao 🔥</p>}
           <div className="wall">
             {wallRef.current.map((w) => (
@@ -456,11 +423,9 @@ export default function App() {
         </main>
       )}
 
-      {tab === 'explore' && <Explorer mapRef={mapRef} metaRef={metaRef} rejectRef={rejectRef} onReject={rejectImage} onUnreject={unreject} running={running} />}
-
+      {tab === 'explore' && <Explorer mapRef={mapRef} metaRef={metaRef} rejectRef={rejectRef} onReject={rejectImage} onUnreject={unreject} />}
       {tab === 'logs' && <LogsFull logRef={logRef} />}
-
-      {tab === 'export' && <ExportPanel exportAll={exportAll} exportMapOnly={exportMapOnly} stats={{ total, done, onlineFound, aiGen, failCount, rejectCount }} />}
+      {tab === 'export' && <ExportPanel exportAll={exportAll} exportMapOnly={exportMapOnly} stats={{ total, done, onlineFound, aiGen }} />}
       {completedAt && <Confetti onClose={() => setCompletedAt(null)} />}
     </div>
   )
@@ -520,7 +485,7 @@ function Confetti({ onClose }) {
     <div className="confettiWrap" onClick={onClose}>
       <div className="confettiCard">
         <div className="bigC">🎉 MISSION COMPLETE 🎉</div>
-        <p>Final JSON auto-download ho raha hai — check downloads folder</p>
+        <p>Final JSON auto-download ho raha hai</p>
         <button className="btn go">OK ✨</button>
       </div>
       {bits.map((b, i) => <span key={i} className="cbit" style={{ left: b.l + 'vw', animationDelay: b.d + 's', animationDuration: b.dur + 's', fontSize: b.s }}>{b.e}</span>)}
@@ -536,14 +501,12 @@ function Stat({ label, value, icon, accent = '', sub, text }) {
     </div>
   )
 }
-
 function Field({ label, value, onChange, type = 'text', ph }) {
   return (
     <label className="field"><span>{label}</span>
       <input type={type} value={value} placeholder={ph || ''} onChange={(e) => onChange(e.target.value)} autoComplete="off" /></label>
   )
 }
-
 function LogTail({ logRef }) {
   const logs = logRef.current.slice(-7)
   return (
@@ -556,7 +519,6 @@ function LogTail({ logRef }) {
     </section>
   )
 }
-
 function LogsFull({ logRef }) {
   const boxRef = useRef(null)
   const [stick, setStick] = useState(true)
@@ -571,8 +533,7 @@ function LogsFull({ logRef }) {
     </main>
   )
 }
-
-function Explorer({ mapRef, metaRef, rejectRef, onReject, onUnreject, running }) {
+function Explorer({ mapRef, metaRef, rejectRef, onReject, onUnreject }) {
   const [q, setQ] = useState('')
   const [cat, setCat] = useState('')
   const [st, setSt] = useState('all')
@@ -597,7 +558,7 @@ function Explorer({ mapRef, metaRef, rejectRef, onReject, onUnreject, running })
         {['all', 'done', 'pending', 'rejected'].map((s) => (
           <button key={s} className={`chipBtn ${st === s ? 'on' : ''}`} onClick={() => { setSt(s); setLimit(120) }}>{s}</button>
         ))}
-        <span className="muted">{rows.length.toLocaleString('en-IN')} items · 👎 reject karke AI regen karwao</span>
+        <span className="muted">{rows.length.toLocaleString('en-IN')} items</span>
       </div>
       <div className="expGrid">
         {rows.slice(0, limit).map((it) => {
@@ -610,7 +571,7 @@ function Explorer({ mapRef, metaRef, rejectRef, onReject, onUnreject, running })
                 {url ? <img src={url} loading="lazy" alt={it.name} /> : <span className="emo pulse">{it.ft === 'cooked' ? '🍲' : '🌿'}</span>}
                 {s === 'done' && (
                   <div className="thumbOps">
-                    <button className="opBtn bad" title="Reject — AI se dobara banao" onClick={() => onReject(it.id)}>👎</button>
+                    <button className="opBtn bad" title="Reject — dobara banao" onClick={() => onReject(it.id)}>👎</button>
                     <span className="srcTag">{SRC_ICON[src] || '✅'}</span>
                   </div>
                 )}
@@ -626,7 +587,6 @@ function Explorer({ mapRef, metaRef, rejectRef, onReject, onUnreject, running })
     </main>
   )
 }
-
 function ExportPanel({ exportAll, exportMapOnly, stats }) {
   const [busy, setBusy] = useState(false)
   const [doneStats, setDoneStats] = useState(null)
@@ -647,7 +607,7 @@ function ExportPanel({ exportAll, exportMapOnly, stats }) {
           </button>
           <button className="btn ghost" onClick={exportMapOnly}>⬇ sirf map JSON</button>
         </div>
-        {doneStats && <p className="ok2">✅ per-item image: <b>{doneStats.perItem}</b>/{doneStats.total} · fallback {doneStats.cat + doneStats.old}</p>}
+        {doneStats && <p className="ok2">✅ per-item image: <b>{doneStats.perItem}</b>/{doneStats.total}</p>}
         <p className="note">ℹ️ 100% complete pe auto-download hota hai.</p>
       </div>
     </main>

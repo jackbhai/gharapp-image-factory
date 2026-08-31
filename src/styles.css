@@ -104,6 +104,9 @@ h1 { font-size: 24px; margin: 0; letter-spacing: .4px;
 .prov.on { border-color: var(--acc); background: #6ee7ff0d; box-shadow: 0 0 0 1px #6ee7ff33 inset, 0 6px 20px #00000055; }
 .provTitle { font-weight: 700; font-size: 14px; margin-bottom: 5px; }
 .reco { font-size: 10px; background: #34d39922; color: var(--green); border: 1px solid #34d39955; padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
+.reco2 { font-size: 10px; background: #6ee7ff22; color: var(--acc); border: 1px solid #6ee7ff55; padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
+.r2Box { border: 1.5px solid #6ee7ff33; border-radius: 14px; padding: 12px 14px; margin-bottom: 12px;
+  background: linear-gradient(135deg, #6ee7ff0d, #34d39908); }
 .warn2 { font-size: 10px; background: #fbbf2422; color: var(--amber); border: 1px solid #fbbf2455; padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
 .provDesc { font-size: 12px; color: var(--muted); line-height: 1.55; }
 

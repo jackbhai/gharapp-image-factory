@@ -1,38 +1,35 @@
 // ============================================================
-// GharApp Image Factory v2 — SEARCH-FIRST core
-// 1) Online real photos (Wikimedia/Wikipedia/OFF/Openverse/Pexels)
-// 2) Jo na mile -> enhanced AI gen (PixelSter)
-// Sab kuch -> permanent GitHub mirror (jsDelivr) / imgbb
+// GharApp Image Factory v3 — QUALITY-FIRST
+// Real photos: Wikimedia/Wikipedia/TheMealDB/Openverse/Pexels/Pixabay
+// Dimension gate (bekar/chhoti/stretched images auto-reject)
+// Hosts: GitHub+jsDelivr (default) | Cloudflare R2 (fast CDN)
+// Fallback: PixelSter AI (enhanced prompts)
 // ============================================================
 import { DESC } from './data/desc.js'
 
 export const PIXELSTER = 'https://ahm7xmakki.com/api/tti'
 export const IMGBB_UP = 'https://api.imgbb.com/1/upload'
-
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
-// ---------------- Prompt builder (AI ke liye) ----------------
+// ---------------- Prompt builder (AI fallback ke liye) ----------------
 export function descFor(name) {
   const n = name.toLowerCase()
   for (const [rx, d] of DESC) if (rx.test(n)) return d
   return null
 }
-
-// category ke hisaab se photo style — accuracy badhane ke liye
 const CAT_STYLE = [
-  [/spice|masala|herb/i, 'in a small white ceramic bowl, top-down flat-lay, scattered a few pieces around'],
+  [/spice|masala|herb/i, 'in a small white ceramic bowl, top-down flat-lay, few pieces scattered around'],
   [/dal|lentil|pulse|beans|legume/i, 'in a small ceramic bowl, top-down, some grains spilled on wooden table'],
   [/flour|grain|rice|atta|sooji|millets|cereal/i, 'in a bowl plus a small heap on rustic cloth, top-down'],
   [/oil|ghee|fat/i, 'golden liquid in a small glass bowl with a spoon, warm light'],
   [/sweet|mithai|dessert|halwa|ladoo|barfi|kheer/i, 'arranged on a decorative mithai plate, garnished, festive look'],
   [/snack|namkeen|chaat|pakora|samosa/i, 'served in a steel plate with green chutney on the side, street-food vibe'],
-  [/beverage|drink| Juice|milk|lassi|chai/i, 'served in a clear glass, refreshing, condensation drops'],
+  [/beverage|drink|juice|milk|lassi|chai/i, 'served in a clear glass, refreshing, condensation drops'],
   [/bread|roti|paratha|chapati|puri|naan/i, 'stacked in a cloth-lined basket, one torn to show texture, steam'],
   [/fruit/i, 'fresh whole fruits arranged on a wooden crate at a market stall'],
   [/meat|egg|chicken|mutton|fish/i, 'raw fresh cuts on a steel tray, garnish of herbs, butcher style'],
   [/vegetable/i, 'fresh vegetables arranged on a rustic wooden board at a sabzi mandi'],
 ]
-
 export function promptFor(item) {
   const name = item.name
   const cooked = item.ft === 'cooked'
@@ -54,7 +51,7 @@ export function promptFor(item) {
   )
 }
 
-// ---------------- helpers ----------------
+// ---------------- basic helpers ----------------
 async function fetchJsonTimeout(url, opts, timeoutMs = 45000) {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), timeoutMs)
@@ -64,7 +61,6 @@ async function fetchJsonTimeout(url, opts, timeoutMs = 45000) {
     return { status: res.status, json: j }
   } finally { clearTimeout(t) }
 }
-
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const fr = new FileReader()
@@ -74,17 +70,53 @@ function blobToBase64(blob) {
   })
 }
 
+// ------- image QUALITY gate: natural dimensions check (CORS-free via <img>) -------
+export function loadImageDims(url, timeoutMs = 9000) {
+  return new Promise((resolve) => {
+    const img = new Image()
+    const t = setTimeout(() => { img.src = ''; resolve(null) }, timeoutMs)
+    img.onload = () => { clearTimeout(t); resolve({ w: img.naturalWidth, h: img.naturalHeight }) }
+    img.onerror = () => { clearTimeout(t); resolve(null) }
+    img.src = url
+  })
+}
+export function dimsOk(d, minDim = 380) {
+  if (!d) return false
+  const mn = Math.min(d.w, d.h), mx = Math.max(d.w, d.h)
+  const ratio = mx / Math.max(1, mn)
+  return mn >= minDim && ratio <= 1.7   // chhoti ya bahut stretched = reject
+}
+
+// ------- smart blob fetch: direct -> public CORS proxies -------
+const PROXIES = [
+  (u) => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
+  (u) => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+  (u) => 'https://corsproxy.io/?url=' + encodeURIComponent(u),
+]
+const proxyDead = {}
 export async function fetchImageBlob(url, timeoutMs = 30000) {
+  const direct = await tryBlob(url, timeoutMs)
+  if (direct) return direct
+  for (let i = 0; i < PROXIES.length; i++) {
+    if ((proxyDead[i] || 0) > Date.now()) continue
+    try {
+      const b = await tryBlob(PROXIES[i](url), timeoutMs + 12000)
+      if (b) return b
+      throw new Error('empty')
+    } catch { proxyDead[i] = Date.now() + 120000 }
+  }
+  return null
+}
+async function tryBlob(url, timeoutMs) {
   const ctrl = new AbortController()
   const t = setTimeout(() => ctrl.abort(), timeoutMs)
   try {
     const res = await fetch(url, { signal: ctrl.signal })
-    if (!res.ok) throw new Error('http ' + res.status)
+    if (!res.ok) return null
     const b = await res.blob()
-    if (!/^image\//.test(b.type)) throw new Error('not-image ' + b.type)
-    if (b.size < 15000) throw new Error('too-small ' + b.size)
+    if (!/^image\//.test(b.type) || b.size < 8000) return null
     return b
-  } finally { clearTimeout(t) }
+  } catch { return null } finally { clearTimeout(t) }
 }
 
 // ---------------- ONLINE SEARCHERS ----------------
@@ -98,7 +130,6 @@ export function nameScore(name, title) {
   for (const w of nt) if (tt.has(w)) hit++
   return hit / nt.length
 }
-
 export function buildQueries(item) {
   const base = item.name.replace(/\+/g, ' ').replace(/\s{2,}/g, ' ').trim()
   const paren = (/\(([^)]+)\)/.exec(item.name) || [])[1]
@@ -111,7 +142,7 @@ export function buildQueries(item) {
   return [...new Set(qs)].slice(0, 3)
 }
 
-// 1) Wikimedia Commons — File: titles, size info ke saath
+// 1) Wikimedia Commons
 export async function commonsSearch(queries, minScore, szMin = 400) {
   const out = []
   for (const q of queries) {
@@ -127,12 +158,12 @@ export async function commonsSearch(queries, minScore, szMin = 400) {
       const score = nameScore(queries[0] + ' ' + (queries[1] || ''), p.title || '')
       if (score >= minScore) out.push({ url: ii.thumburl || ii.url, title: p.title, score, source: 'commons' })
     }
-    if (out.length) break // best query se mil gaye
+    if (out.length) break
   }
   return out.sort((a, b) => b.score - a.score).slice(0, 4)
 }
 
-// 2) English Wikipedia — dish pages ke original images
+// 2) Wikipedia originals
 export async function wikiSearch(queries, minScore) {
   const out = []
   for (const q of queries) {
@@ -145,39 +176,49 @@ export async function wikiSearch(queries, minScore) {
       if (!p.original?.source) continue
       if ((p.original.width || 0) < 400 || (p.original.height || 0) < 400) continue
       const score = nameScore(queries[0] + ' ' + (queries[1] || ''), p.title || '')
-      if (score >= minScore) out.push({ url: p.original.source, title: 'WP: ' + p.title, score, source: 'wikipedia' })
+      if (score >= minScore) out.push({ url: p.original.source, title: 'WP: ' + p.title, score: score + 0.05, source: 'wikipedia' })
     }
     if (out.length) break
   }
   return out.sort((a, b) => b.score - a.score).slice(0, 3)
 }
 
-// 3) Open Food Facts — packaged/namkeen ke liye perfect
+// 3) TheMealDB — cooked dishes ke curated real photos
+export async function mealdbSearch(queries, minScore) {
+  const out = []
+  for (const q of queries.slice(0, 2)) {
+    const { status, json } = await fetchJsonTimeout('https://www.themealdb.com/api/json/v1/1/search.php?s=' + encodeURIComponent(q), {}, 15000)
+    if (status === 429) throw Object.assign(new Error('mealdb 429'), { srcDead: true })
+    for (const m of json?.meals || []) {
+      if (!m.strMealThumb) continue
+      const score = nameScore(queries[0], m.strMeal)
+      if (score >= minScore) out.push({ url: m.strMealThumb, title: 'MealDB: ' + m.strMeal, score: score + 0.2, source: 'mealdb' })
+    }
+    if (out.length) break
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 2)
+}
+
+// 4) Open Food Facts — sirf packaged, front photo only (bekar low-res band)
 export async function offSearch(queries, minScore) {
   const out = []
   for (const q of queries.slice(0, 2)) {
     const u = 'https://world.openfoodfacts.org/cgi/search.pl?action=process&json=1&search_simple=1&page_size=8'
-      + '&fields=product_name,brands,image_front_url,image_url&search_terms=' + encodeURIComponent(q)
-    let status, json
-    for (let a = 0; a < 2; a++) {
-      ({ status, json } = await fetchJsonTimeout(u, {}, 25000))
-      if (status !== 503 && status !== 429) break
-      await sleep(2000 * (a + 1))
-    }
+      + '&fields=product_name,brands,image_front_url&search_terms=' + encodeURIComponent(q)
+    const { status, json } = await fetchJsonTimeout(u, {}, 25000)
     if (status === 503 || status === 429) throw Object.assign(new Error('off ' + status), { srcDead: true })
     for (const p of json?.products || []) {
-      const img = p.image_front_url || p.image_url
-      if (!img) continue
+      if (!p.image_front_url) continue
       const title = `${p.product_name || ''} ${p.brands || ''}`
       const score = nameScore(queries[0] + ' ' + (queries[1] || ''), title)
-      if (score >= minScore) out.push({ url: img, title: 'OFF: ' + title.trim(), score, source: 'openfoodfacts' })
+      if (score >= minScore + 0.1) out.push({ url: p.image_front_url, title: 'OFF: ' + title.trim(), score, source: 'openfoodfacts' })
     }
     if (out.length) break
   }
-  return out.sort((a, b) => b.score - a.score).slice(0, 3)
+  return out.sort((a, b) => b.score - a.score).slice(0, 2)
 }
 
-// 4) Openverse — CC photos (anon limit kam, last resort)
+// 5) Openverse — backup
 export async function openverseSearch(queries, minScore) {
   const out = []
   const u = 'https://api.openverse.org/v1/images/?page_size=8&filter_dead=false&q=' + encodeURIComponent(queries[0])
@@ -191,7 +232,7 @@ export async function openverseSearch(queries, minScore) {
   return out.sort((a, b) => b.score - a.score).slice(0, 3)
 }
 
-// 5) Pexels — agar user key de (200/hr)
+// 6) Pexels (optional key)
 export async function pexelsSearch(queries, key, minScore) {
   const u = 'https://api.pexels.com/v1/search?per_page=8&query=' + encodeURIComponent(queries[0])
   const { status, json } = await fetchJsonTimeout(u, { headers: { Authorization: key } }, 25000)
@@ -204,9 +245,22 @@ export async function pexelsSearch(queries, key, minScore) {
   return out.sort((a, b) => b.score - a.score).slice(0, 3)
 }
 
-export const OFF_FIRST = /snack|namkeen|biscuit|cookie|bakery|packaged|mixture|chocolate|wafer|noodle|ketchup|sauce|jam|pickle branded/i
+// 7) Pixabay (optional key — photoreal stock, 100 req/min free)
+export async function pixabaySearch(queries, key, minScore) {
+  const u = `https://pixabay.com/api/?key=${key}&image_type=photo&per_page=8&safesearch=true&q=` + encodeURIComponent(queries[0])
+  const { status, json } = await fetchJsonTimeout(u, {}, 25000)
+  if (status === 429 || status === 400) throw Object.assign(new Error('pixabay ' + status), { srcDead: true })
+  const out = []
+  for (const h of json?.hits || []) {
+    const score = nameScore(queries[0] + ' ' + (queries[1] || ''), (h.tags || '').replace(/,/g, ''))
+    if (score >= minScore) out.push({ url: h.largeImageURL || h.webformatURL, title: 'PB: ' + (h.tags || ''), score, source: 'pixabay' })
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 3)
+}
 
-// ---------------- PixelSter AI generation ----------------
+export const OFF_FIRST = /snack|namkeen|biscuit|cookie|bakery|packaged|mixture|chocolate|wafer|noodle|ketchup|sauce|jam/i
+
+// ---------------- PixelSter AI (fallback) ----------------
 export async function generateOne(prompt, tries = 3, onRetry) {
   let lastErr = 'unknown'
   for (let a = 1; a <= tries; a++) {
@@ -224,42 +278,7 @@ export async function generateOne(prompt, tries = 3, onRetry) {
   throw new Error(lastErr)
 }
 
-// ---------------- optional CLIP verify (browser AI) ----------------
-let clipPipe = null
-export async function clipCheck(blob, name, log) {
-  try {
-    if (!clipPipe) {
-      const mod = await import(/* @vite-ignore */ 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2')
-      mod.env.allowLocalModels = false
-      clipPipe = await mod.pipeline('zero-shot-image-classification', 'Xenova/clip-vit-base-patch32')
-      log && log('🧠 CLIP verify model ready', 'info')
-    }
-    const url = URL.createObjectURL(blob)
-    const labels = [`a photo of ${name}`, 'a photo of indian food', 'a photo of vegetables', 'a random object', 'a non-food item']
-    const res = await clipPipe(url, labels)
-    URL.revokeObjectURL(url)
-    return res?.[0]?.label === labels[0]
-  } catch (e) {
-    log && log('🧠 CLIP unavailable, verify skip: ' + (e.message || e), 'warn')
-    return true // fail-open
-  }
-}
-
-// ---------------- Host A: imgbb ----------------
-export async function uploadImgbb(blob, name, key) {
-  const fd = new FormData()
-  fd.append('key', key)
-  fd.append('image', await blobToBase64(blob))
-  fd.append('name', name)
-  const { json } = await fetchJsonTimeout(IMGBB_UP, { method: 'POST', body: fd }, 60000)
-  if (json && json.success && json.data) return json.data.image?.url || json.data.display_url || json.data.url
-  const msg = json?.error?.message || 'imgbb upload failed'
-  const err = new Error(msg)
-  if (/rate limit/i.test(msg)) err.rateLimited = true
-  throw err
-}
-
-// ---------------- Host B: GitHub (PERMANENT) ----------------
+// ---------------- Host A: GitHub + jsDelivr (default, proven) ----------------
 export function jsDelivrUrl(owner, repo, branch, path) {
   return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${branch}/${path}`
 }
@@ -278,7 +297,6 @@ async function gh(pat, method, url, body) {
   const j = await res.json().catch(() => ({}))
   return { status: res.status, json: j }
 }
-
 export async function ensureGhBranch({ pat, owner, repo, branch }, log) {
   const r = await gh(pat, 'GET', `/repos/${owner}/${repo}/git/ref/heads/${branch}`)
   if (r.status === 200) return true
@@ -290,7 +308,6 @@ export async function ensureGhBranch({ pat, owner, repo, branch }, log) {
   if (c.status === 422) return true
   throw new Error('branch create fail: ' + (c.json.message || c.status))
 }
-
 export async function uploadGithub({ pat, owner, repo, branch, folder }, item, blob) {
   const path = `${folder}/${item.id}.jpg`.replace(/^\/+/, '')
   const body = { message: `img: ${item.id} (${item.name})`, content: await blobToBase64(blob), branch }
@@ -306,75 +323,68 @@ export async function uploadGithub({ pat, owner, repo, branch, folder }, item, b
   throw err
 }
 
-// ---------------- OpenRouter VISION SELECTOR (best-1 picker) ----------------
-// Multiple candidates me se sabse perfect image vision-LLM se chunwao
-const OR_API = 'https://openrouter.ai/api/v1/chat/completions'
-export const OR_FREE_VISION = [
-  'google/gemma-4-31b-it:free',
-  'google/gemma-4-26b-a4b-it:free',
-  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
-  'minimax/minimax-m3:free',
-  'thinkingmachines/inkling:free',
-  'openrouter/free',
-]
-
-async function orChat(key, model, content, timeoutMs = 60000) {
-  const ctrl = new AbortController()
-  const t = setTimeout(() => ctrl.abort(), timeoutMs)
-  try {
-    const res = await fetch(OR_API, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer ' + key,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://jackbhai.github.io/gharapp-image-factory/',
-        'X-Title': 'GharApp Image Factory',
-      },
-      body: JSON.stringify({ model, messages: [{ role: 'user', content }], max_tokens: 80, temperature: 0 }),
-      signal: ctrl.signal,
-    })
-    if (res.status === 429) throw Object.assign(new Error('openrouter 429 quota'), { orDead: true })
-    if (res.status === 401) throw new Error('invalid OpenRouter key')
-    const j = await res.json().catch(() => ({}))
-    if (j?.error) throw Object.assign(new Error(String(j.error.message || j.error).slice(0, 100)), { orDead: /rate|limit|quota/i.test(String(j.error.message || '')) })
-    return j?.choices?.[0]?.message?.content || ''
-  } finally { clearTimeout(t) }
+// ---------------- Host B: Cloudflare R2 (fast CDN, SigV4 in-browser) ----------------
+const TE = new TextEncoder()
+const hexU8 = (u8) => [...u8].map((b) => b.toString(16).padStart(2, '0')).join('')
+async function sha256hex(data) { return hexU8(new Uint8Array(await crypto.subtle.digest('SHA-256', data))) }
+async function hmac(key, data) {
+  const k = await crypto.subtle.importKey('raw', typeof key === 'string' ? TE.encode(key) : key, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  return new Uint8Array(await crypto.subtle.sign('HMAC', k, typeof data === 'string' ? TE.encode(data) : data))
+}
+export async function uploadR2({ accountId, keyId, secret, bucket, pub }, item, blob) {
+  const key = `items/${item.id}.jpg`
+  return r2PutObject({ accountId, keyId, secret, bucket }, key, blob).then(() => `${pub.replace(/\/+$/, '')}/${key}`)
+}
+export async function r2PutObject({ accountId, keyId, secret, bucket }, key, blob) {
+  const host = `${accountId}.r2.cloudflarestorage.com`
+  const path = `/${bucket}/${key}`
+  const now = new Date()
+  const amzdate = now.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')
+  const datestamp = amzdate.slice(0, 8)
+  const payloadHash = await sha256hex(await blob.arrayBuffer())
+  const canonHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzdate}\n`
+  const signedHeaders = 'host;x-amz-content-sha256;x-amz-date'
+  const canonReq = ['PUT', path.split('/').map(encodeURIComponent).join('/'), '', canonHeaders, signedHeaders, payloadHash].join('\n')
+  const scope = `${datestamp}/auto/s3/aws4_request`
+  const stringToSign = ['AWS4-HMAC-SHA256', amzdate, scope, await sha256hex(TE.encode(canonReq))].join('\n')
+  const kDate = await hmac('AWS4' + secret, datestamp)
+  const kRegion = await hmac(kDate, 'auto')
+  const kService = await hmac(kRegion, 's3')
+  const kSigning = await hmac(kService, 'aws4_request')
+  const sig = hexU8(await hmac(kSigning, stringToSign))
+  const res = await fetch(`https://${host}${path}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `AWS4-HMAC-SHA256 Credential=${keyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${sig}`,
+      'x-amz-content-sha256': payloadHash,
+      'x-amz-date': amzdate,
+      'Content-Type': blob.type || 'image/jpeg',
+    },
+    body: blob,
+  })
+  if (!res.ok) throw new Error('R2 ' + res.status + ': ' + (await res.text()).slice(0, 140))
+  return true
+}
+export async function r2Test(cfg) {
+  const tiny = new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0xff, 0xd9])], { type: 'image/jpeg' })
+  await r2PutObject(cfg, '__ping__.jpg', tiny)
+  const r = await fetch(`${cfg.pub.replace(/\/+$/, '')}/__ping__.jpg`, { method: 'GET' })
+  if (!r.ok) throw new Error('✅ upload ho gaya! Par public URL ' + r.status + ' — Cloudflare dashboard → R2 → bucket Settings → "Allow Public Access" (r2.dev) ON karo, phir public URL yahan update karo')
+  return true
 }
 
-const strictJson = (txt) => { const m = String(txt).match(/\{[\s\S]*?\}/); if (!m) throw new Error('no-json-reply'); return JSON.parse(m[0]) }
-
-// candidates (max 4) me se best index (1-based) lo; 0 = koi bhi match nahi
-export async function orPickBest(item, cands, key, model) {
-  const content = [
-    {
-      type: 'text',
-      text:
-        `You are picking a thumbnail photo for an Indian food app.\n` +
-        `Item: "${item.name}" — ${item.ft === 'cooked' ? 'a COOKED prepared Indian dish' : 'a RAW whole ingredient'}.\n` +
-        `Rules: the winning image must actually depict THIS exact item (not a similar one), be appetizing, clear, good quality.\n` +
-        `Images are shown in order 1..${cands.length}. Reply ONLY strict JSON: {"best": <1..${cands.length} or 0 if NONE match>, "why": "<max 5 words>"}`,
-    },
-    ...cands.map((c) => ({ type: 'image_url', image_url: { url: c.url } })),
-  ]
-  const txt = await orChat(key, model, content)
-  const j = strictJson(txt)
-  const best = Math.max(0, Math.min(cands.length, parseInt(j.best, 10) || 0))
-  return { best, why: String(j.why || '').slice(0, 60) }
-}
-
-// single image verify: sahi item hai ya nahi
-export async function orVerify(item, url, key, model) {
-  const content = [
-    {
-      type: 'text',
-      text:
-        `Does this image correctly and clearly show "${item.name}" (${item.ft === 'cooked' ? 'a cooked Indian dish' : 'a raw ingredient'})?\n` +
-        `It must actually be that item. Reply ONLY strict JSON: {"ok": true} or {"ok": false}`,
-    },
-    { type: 'image_url', image_url: { url } },
-  ]
-  const txt = await orChat(key, model, content)
-  return !!strictJson(txt).ok
+// ---------------- Host C: imgbb (backup) ----------------
+export async function uploadImgbb(blob, name, key) {
+  const fd = new FormData()
+  fd.append('key', key)
+  fd.append('image', await blobToBase64(blob))
+  fd.append('name', name)
+  const { json } = await fetchJsonTimeout(IMGBB_UP, { method: 'POST', body: fd }, 60000)
+  if (json && json.success && json.data) return json.data.image?.url || json.data.display_url || json.data.url
+  const msg = json?.error?.message || 'imgbb upload failed'
+  const err = new Error(msg)
+  if (/rate limit/i.test(msg)) err.rateLimited = true
+  throw err
 }
 
 // ---------------- export ----------------
@@ -386,7 +396,6 @@ export function download(name, text, type = 'application/json') {
   a.click()
   setTimeout(() => URL.revokeObjectURL(a.href), 5000)
 }
-
 export function buildFinalSeed(fullSeed, mergedMap, catMap) {
   const out = JSON.parse(JSON.stringify(fullSeed))
   let perItem = 0, cat = 0, old = 0, missing = 0
