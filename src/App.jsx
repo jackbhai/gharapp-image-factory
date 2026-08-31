@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import {
   promptFor, generateOne, fetchImageBlob, loadImageDims, dimsOk,
-  commonsSearch, wikiSearch, mealdbSearch, offSearch, openverseSearch, pexelsSearch, pixabaySearch,
+  commonsSearch, wikiSearch, mealdbSearch, offSearch, openverseSearch, pexelsSearch, pixabaySearch, bbSearch,
   buildQueries, OFF_FIRST,
   uploadImgbb, uploadGithub, uploadR2, r2Test, ensureGhBranch,
   download, buildFinalSeed, sleep,
@@ -20,6 +20,7 @@ const DEFAULT_SETTINGS = {
   imgbbKey: '',
   workers: 12, autoRounds: 3,
   onlineOn: true, aiOnly: false, minScore: 0.5, minDim: 380,
+  srcBB: true, bbWorker: '',
   srcCommons: true, srcWiki: true, srcMeal: true, srcOpenverse: true, srcOff: false,
   srcPexels: false, pexelsKey: '',
   srcPixabay: false, pixabayKey: '',
@@ -28,7 +29,7 @@ const DEFAULT_SETTINGS = {
 const loadLS = (k, d) => { try { return { ...d, ...JSON.parse(localStorage.getItem(k) || '{}') } } catch { return d } }
 const fmtClock = (t) => new Date(t).toLocaleTimeString('en-IN', { hour12: false })
 const fmtDur = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return h ? `${h}h ${m}m` : m ? `${m}m ${s % 60}s` : `${s}s` }
-const SRC_ICON = { commons: '🌐', wikipedia: '📖', mealdb: '🍛', openfoodfacts: '🥫', openverse: '🖼', pexels: '📷', pixabay: '📸', ai: '🎨' }
+const SRC_ICON = { bigbasket: '🛒', commons: '🌐', wikipedia: '📖', mealdb: '🍛', openfoodfacts: '🥫', openverse: '🖼', pexels: '📷', pixabay: '📸', ai: '🎨' }
 
 export default function App() {
   const [tab, setTab] = useState('dash')
@@ -97,6 +98,8 @@ export default function App() {
         try { cand.push(...(await fn)) } catch (e) { if (e.srcDead) markDead(src, e.message); else log(`⚠️ ${src}: ${e.message}`, 'warn') }
       }
       const offFirst = OFF_FIRST.test(item.cat || '') || OFF_FIRST.test(item.name)
+      // 🛒 BigBasket (via worker) — sabse pehle: exact name match + studio shots
+      if (s.srcBB && s.bbWorker.trim()) await trySrc('bigbasket', bbSearch(s.bbWorker.trim(), qs, thr))
       if (offFirst && s.srcOff) await trySrc('openfoodfacts', offSearch(qs, thr))
       if (item.ft === 'cooked' && s.srcMeal) await trySrc('mealdb', mealdbSearch(qs, thr))
       if (s.srcCommons) await trySrc('commons', commonsSearch(qs, thr))
@@ -368,6 +371,8 @@ export default function App() {
                 <h3>🧠 Pipeline — QUALITY first</h3>
                 <label className="switch"><input type="checkbox" checked={settings.onlineOn} onChange={(e) => setS('onlineOn', e.target.checked)} /><span>🌐 Online real-photo search (dimension-gate ke saath)</span></label>
                 <div className="srcToggles">
+                  <label className="switch sm bb"><input type="checkbox" checked={settings.srcBB} onChange={(e) => setS('srcBB', e.target.checked)} /><span><b>🛒 BigBasket</b> (scraped — clean studio shots, exact match!)</span></label>
+                  {settings.srcBB && <Field label="BigBasket worker URL" value={settings.bbWorker} onChange={(v) => setS('bbWorker', v)} ph="https://bbimg.<subdomain>.workers.dev — deploy 2 min (README)" />}
                   <label className="switch sm"><input type="checkbox" checked={settings.srcCommons} onChange={(e) => setS('srcCommons', e.target.checked)} /><span>Wikimedia Commons</span></label>
                   <label className="switch sm"><input type="checkbox" checked={settings.srcWiki} onChange={(e) => setS('srcWiki', e.target.checked)} /><span>Wikipedia</span></label>
                   <label className="switch sm"><input type="checkbox" checked={settings.srcMeal} onChange={(e) => setS('srcMeal', e.target.checked)} /><span>TheMealDB (cooked dishes)</span></label>
@@ -387,7 +392,7 @@ export default function App() {
                   <input type="range" min="300" max="600" step="20" value={settings.minDim} onChange={(e) => setS('minDim', +e.target.value)} />
                 </div>
                 <label className="switch"><input type="checkbox" checked={settings.aiOnly} onChange={(e) => setS('aiOnly', e.target.checked)} /><span>🎨 Sirf AI generation (online search skip)</span></label>
-                <p className="note">⚠️ BigBasket/Blinkit static site se scrape <b>nahi ho sakta</b> (CORS + login-session + Cloudflare bot-protection) — isliye unke jaisi clean product shots quality-gate + enhanced AI combos se banti hain.</p>
+                <p className="note">🛒 <b>BigBasket scraping</b> Cloudflare Worker se chalti hai (browser direct nahi, worker se session banake). Worker code: <code>worker/bbimg.js</code> repo me — 2 min deploy (README steps), URL upar paste karo. Free 1 lakh req/day.</p>
               </div>
             </div>
             <div className="rowCtrls">

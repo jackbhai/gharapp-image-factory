@@ -260,6 +260,24 @@ export async function pixabaySearch(queries, key, minScore) {
 
 export const OFF_FIRST = /snack|namkeen|biscuit|cookie|bakery|packaged|mixture|chocolate|wafer|noodle|ketchup|sauce|jam/i
 
+// 8) 🛒 BigBasket (via tumhara Cloudflare Worker) — clean studio product shots, EXACT match
+export async function bbSearch(workerUrl, queries, minScore) {
+  const base = String(workerUrl || '').replace(/\/+$/, '')
+  const out = []
+  for (const q of queries.slice(0, 2)) {
+    const { status, json } = await fetchJsonTimeout(`${base}/search?q=${encodeURIComponent(q)}`, {}, 30000)
+    if (status !== 200) throw Object.assign(new Error('bb ' + (status || 'unreachable')), { srcDead: true })
+    if (json.error) throw Object.assign(new Error('bb ' + String(json.error).slice(0, 50)), { srcDead: true })
+    for (const it of json.items || []) {
+      const title = (it.name + ' ' + it.brand).trim()
+      const score = nameScore(queries[0] + ' ' + (queries[1] || ''), title)
+      if (score >= minScore) out.push({ url: it.img, title: 'BB: ' + title, score: score + 0.1, source: 'bigbasket' })
+    }
+    if (out.length) break
+  }
+  return out.sort((a, b) => b.score - a.score).slice(0, 4)
+}
+
 // ---------------- PixelSter AI (fallback) ----------------
 export async function generateOne(prompt, tries = 3, onRetry) {
   let lastErr = 'unknown'
