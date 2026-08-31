@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import {
   promptFor, generateOne, fetchImageBlob, clipCheck,
   commonsSearch, wikiSearch, offSearch, openverseSearch, pexelsSearch,
-  buildQueries, nameScore, OFF_FIRST,
+  buildQueries, nameScore, OFF_FIRST, orPickBest, orVerify, OR_FREE_VISION,
   uploadImgbb, uploadGithub, ensureGhBranch,
   download, buildFinalSeed, sleep,
 } from './factory.js'
@@ -23,6 +23,9 @@ const DEFAULT_SETTINGS = {
   srcCommons: true, srcWiki: true, srcOff: true, srcOpenverse: true, srcPexels: false,
   pexelsKey: '',
   clipVerify: false,
+  // --- OpenRouter vision selector ---
+  orKey: '', orModel: 'google/gemma-4-31b-it:free',
+  orSelect: true, orVerifyAI: false, maxCand: 4,
 }
 
 const loadLS = (k, d) => { try { return { ...d, ...JSON.parse(localStorage.getItem(k) || '{}') } } catch { return d } }
@@ -44,6 +47,7 @@ export default function App() {
   const wallRef = useRef([])
   const inflightRef = useRef(new Map())
   const srcCountRef = useRef({})    // source -> count
+  const orCountRef = useRef({ picks: 0, verifies: 0, orRejected: 0 })
   const speedRef = useRef([])
   const histRef = useRef([])
   const deadRef = useRef({})        // src -> dead-until ts
@@ -108,7 +112,28 @@ export default function App() {
       if (!cand.length && s.srcPexels && s.pexelsKey) await trySrc('pexels', pexelsSearch(qs, s.pexelsKey, thr))
 
       const seen = new Set()
-      const uniq = cand.filter((c) => !seen.has(c.url) && seen.add(c.url)).sort((a, b) => b.score - a.score).slice(0, 5)
+      let uniq = cand.filter((c) => !seen.has(c.url) && seen.add(c.url)).sort((a, b) => b.score - a.score).slice(0, Math.max(2, s.maxCand || 4))
+
+      // 🧠 OpenRouter vision: multiple candidates me se BEST 1
+      if (uniq.length >= 2 && s.orKey.trim() && s.orSelect && alive('openrouter')) {
+        st('🧠 best pick')
+        try {
+          const { best, why } = await orPickBest(item, uniq.slice(0, 4), s.orKey.trim(), s.orModel.trim())
+          orCountRef.current.picks++
+          if (best === 0) {
+            log(`🧠 ${item.name}: vision ne koi match nahi mana (${why}) → AI se banayenge`, 'warn')
+            uniq = []
+          } else {
+            const chosen = uniq[best - 1]
+            uniq = [chosen, ...uniq.filter((c) => c !== chosen)]
+            log(`🧠 ${item.name}: vision picked #${best} — ${String(chosen.title).slice(0, 44)} (${why})`, 'ok')
+          }
+        } catch (e) {
+          if (e.orDead) markDead('openrouter', e.message)
+          else log(`🧠 vision fail (${e.message}) — score order se chalenge`, 'warn')
+        }
+      }
+
       for (const c of uniq) {
         st('🪞 fetch')
         try {
@@ -116,21 +141,39 @@ export default function App() {
           return { blob, src: c.source, via: c.title }
         } catch { /* CORS/size fail -> next */ }
       }
-      if (uniq.length) log(`🔎 ${item.name}: ${uniq.length} candidates mile par fetch nahi hua — AI se banayenge`, 'warn')
+      if (uniq.length) log(`🔎 ${item.name}: candidates mile par fetch nahi hua — AI se banayenge`, 'warn')
     }
 
-    // ===== STEP 2: AI GENERATION (enhanced prompt) =====
-    st('🎨 AI gen')
-    const prompt = promptFor(item)
-    const gen = await generateOne(prompt, 3, (a, e) => log(`⚠️ W${wid} ${item.name}: retry ${a} (${e})`, 'warn'))
-    st('🪞 fetch')
-    const blob = await fetchImageBlob(gen.imageUrl)
-    if (s.clipVerify) {
-      st('🧠 verify')
-      const ok = await clipCheck(blob, item.name, log)
-      if (!ok) throw new Error('ai-verify reject (image galat lagi model ko)')
+    // ===== STEP 2: AI GENERATION (enhanced prompt + optional vision verify) =====
+    const orVerifyOn = s.orKey.trim() && s.orVerifyAI
+    const maxShots = (s.clipVerify || orVerifyOn) ? 2 : 1
+    for (let shot = 1; shot <= maxShots; shot++) {
+      st('🎨 AI gen')
+      const prompt = promptFor(item)
+      const gen = await generateOne(prompt, 3, (a, e) => log(`⚠️ W${wid} ${item.name}: retry ${a} (${e})`, 'warn'))
+      st('🪞 fetch')
+      const blob = await fetchImageBlob(gen.imageUrl)
+      let ok = true
+      if (orVerifyOn && alive('openrouter')) {
+        st('🧠 verify')
+        try {
+          ok = await orVerify(item, gen.imageUrl, s.orKey.trim(), s.orModel.trim())
+          orCountRef.current.verifies++
+          if (!ok) orCountRef.current.orRejected++
+        } catch (e) {
+          if (e.orDead) markDead('openrouter', e.message)
+          else log(`🧠 verify call fail: ${e.message}`, 'warn')
+          ok = true // call fail ho to image accept (pipeline na ruke)
+        }
+      }
+      if (ok && s.clipVerify) {
+        st('🧠 clip verify')
+        ok = await clipCheck(blob, item.name, log)
+      }
+      if (ok) return { blob, src: 'ai', via: 'pixelster flux' }
+      log(`🧠 ${item.name}: verify fail (shot ${shot}/${maxShots})${shot < maxShots ? ' — dobara banayenge' : ''}`, 'warn')
     }
-    return { blob, src: 'ai', via: 'pixelster flux' }
+    throw new Error('vision verify reject — next round me phir try hoga')
   }
 
   async function workerLoop(wid) {
@@ -356,6 +399,26 @@ export default function App() {
                 <label className="switch"><input type="checkbox" checked={settings.aiOnly} onChange={(e) => setS('aiOnly', e.target.checked)} /><span>🎨 Sirf AI generation (online search skip)</span></label>
                 <label className="switch"><input type="checkbox" checked={settings.clipVerify} onChange={(e) => setS('clipVerify', e.target.checked)} /><span>🧠 AI-verify images (browser CLIP, slow first load ~100MB)</span></label>
                 <label className="switch sm">Jo online na mile → <b>enhanced descriptor prompt</b> se AI banayega (bekar image nahi banegi)</label>
+
+                <div className="orBox">
+                  <h3>🧠 OpenRouter Vision — PERFECT-1 picker</h3>
+                  <label className="switch"><input type="checkbox" checked={settings.orSelect} onChange={(e) => setS('orSelect', e.target.checked)} />
+                    <span>Multiple online images me se <b>vision-LLM se best 1</b> chunwao (jo match na kare unhe reject karke AI banwayega)</span></label>
+                  <label className="switch"><input type="checkbox" checked={settings.orVerifyAI} onChange={(e) => setS('orVerifyAI', e.target.checked)} />
+                    <span>AI-generated images ko bhi <b>vision se verify</b> karo (galat ho to 1 aur shot)</span></label>
+                  <div className="fieldGrid">
+                    <Field label="OpenRouter API key" type="password" value={settings.orKey} onChange={(v) => setS('orKey', v)} ph="sk-or-… openrouter.ai/keys" />
+                    <label className="field"><span>Vision model (free wale recommended)</span>
+                      <input list="orModels" value={settings.orModel} onChange={(e) => setS('orModel', e.target.value)} autoComplete="off" />
+                      <datalist id="orModels">{OR_FREE_VISION.map((m) => <option key={m} value={m} />)}</datalist>
+                    </label>
+                  </div>
+                  <div className="sliderBox">
+                    <label>Max candidates vision ko bhejo: <b>{settings.maxCand}</b> <span className="muted">(2–5)</span></label>
+                    <input type="range" min="2" max="5" value={settings.maxCand} onChange={(e) => setS('maxCand', +e.target.value)} />
+                  </div>
+                  <p className="note">ℹ️ Free tier: ~50 req/day (no credit) / 1000 req/day ($10 credit). Quota khatam → auto-fallback, pipeline <b>kabhi nahi rukti</b>. 🧠 picks: <b>{orCountRef.current.picks}</b> · verifies: <b>{orCountRef.current.verifies}</b> · OR-rejects: <b>{orCountRef.current.orRejected}</b></p>
+                </div>
               </div>
             </div>
             <div className="rowCtrls">

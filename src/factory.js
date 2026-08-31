@@ -306,6 +306,77 @@ export async function uploadGithub({ pat, owner, repo, branch, folder }, item, b
   throw err
 }
 
+// ---------------- OpenRouter VISION SELECTOR (best-1 picker) ----------------
+// Multiple candidates me se sabse perfect image vision-LLM se chunwao
+const OR_API = 'https://openrouter.ai/api/v1/chat/completions'
+export const OR_FREE_VISION = [
+  'google/gemma-4-31b-it:free',
+  'google/gemma-4-26b-a4b-it:free',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+  'minimax/minimax-m3:free',
+  'thinkingmachines/inkling:free',
+  'openrouter/free',
+]
+
+async function orChat(key, model, content, timeoutMs = 60000) {
+  const ctrl = new AbortController()
+  const t = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    const res = await fetch(OR_API, {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ' + key,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://jackbhai.github.io/gharapp-image-factory/',
+        'X-Title': 'GharApp Image Factory',
+      },
+      body: JSON.stringify({ model, messages: [{ role: 'user', content }], max_tokens: 80, temperature: 0 }),
+      signal: ctrl.signal,
+    })
+    if (res.status === 429) throw Object.assign(new Error('openrouter 429 quota'), { orDead: true })
+    if (res.status === 401) throw new Error('invalid OpenRouter key')
+    const j = await res.json().catch(() => ({}))
+    if (j?.error) throw Object.assign(new Error(String(j.error.message || j.error).slice(0, 100)), { orDead: /rate|limit|quota/i.test(String(j.error.message || '')) })
+    return j?.choices?.[0]?.message?.content || ''
+  } finally { clearTimeout(t) }
+}
+
+const strictJson = (txt) => { const m = String(txt).match(/\{[\s\S]*?\}/); if (!m) throw new Error('no-json-reply'); return JSON.parse(m[0]) }
+
+// candidates (max 4) me se best index (1-based) lo; 0 = koi bhi match nahi
+export async function orPickBest(item, cands, key, model) {
+  const content = [
+    {
+      type: 'text',
+      text:
+        `You are picking a thumbnail photo for an Indian food app.\n` +
+        `Item: "${item.name}" — ${item.ft === 'cooked' ? 'a COOKED prepared Indian dish' : 'a RAW whole ingredient'}.\n` +
+        `Rules: the winning image must actually depict THIS exact item (not a similar one), be appetizing, clear, good quality.\n` +
+        `Images are shown in order 1..${cands.length}. Reply ONLY strict JSON: {"best": <1..${cands.length} or 0 if NONE match>, "why": "<max 5 words>"}`,
+    },
+    ...cands.map((c) => ({ type: 'image_url', image_url: { url: c.url } })),
+  ]
+  const txt = await orChat(key, model, content)
+  const j = strictJson(txt)
+  const best = Math.max(0, Math.min(cands.length, parseInt(j.best, 10) || 0))
+  return { best, why: String(j.why || '').slice(0, 60) }
+}
+
+// single image verify: sahi item hai ya nahi
+export async function orVerify(item, url, key, model) {
+  const content = [
+    {
+      type: 'text',
+      text:
+        `Does this image correctly and clearly show "${item.name}" (${item.ft === 'cooked' ? 'a cooked Indian dish' : 'a raw ingredient'})?\n` +
+        `It must actually be that item. Reply ONLY strict JSON: {"ok": true} or {"ok": false}`,
+    },
+    { type: 'image_url', image_url: { url } },
+  ]
+  const txt = await orChat(key, model, content)
+  return !!strictJson(txt).ok
+}
+
 // ---------------- export ----------------
 export function download(name, text, type = 'application/json') {
   const b = new Blob([text], { type })
