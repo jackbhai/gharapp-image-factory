@@ -107,6 +107,24 @@ h1 { font-size: 24px; margin: 0; letter-spacing: .4px;
 .reco2 { font-size: 10px; background: #6ee7ff22; color: var(--acc); border: 1px solid #6ee7ff55; padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
 .r2Box { border: 1.5px solid #6ee7ff33; border-radius: 14px; padding: 12px 14px; margin-bottom: 12px;
   background: linear-gradient(135deg, #6ee7ff0d, #34d39908); }
+
+/* workflow cards (server scrapers) */
+.wfGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 10px; }
+.wfCard { background: #0d1424; border: 1px solid #6ee7ff2e; border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.wfTitle { font-size: 14px; font-weight: 700; }
+.wfStatus { font-size: 11px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; }
+.wfStatus.st-idle { color: var(--muted); }
+.wfStatus.st-in, .wfStatus.st-queued { color: var(--amber); animation: pulse 1.4s infinite; }
+.wfStatus.st-success, .wfStatus.st-completed { color: var(--green); }
+.wfStatus.st-failure { color: var(--red); }
+.smbtn { padding: 7px 14px; font-size: 12px; border-radius: 9px; }
+.runsList { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.runRow { display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; padding: 6px 10px;
+  background: #ffffff08; border-radius: 8px; color: var(--muted); text-decoration: none; }
+.runRow:hover { color: var(--txt); background: #ffffff12; }
+.runRow.st-in_progress, .runRow.st-queued { color: var(--amber); }
+.runRow em { font-style: normal; font-size: 10px; }
+.pipeLegend { font-size: 12.5px; color: var(--muted); line-height: 1.9; background: #ffffff08; border-radius: 10px; padding: 10px 12px; }
 .warn2 { font-size: 10px; background: #fbbf2422; color: var(--amber); border: 1px solid #fbbf2455; padding: 2px 8px; border-radius: 999px; margin-left: 6px; }
 .provDesc { font-size: 12px; color: var(--muted); line-height: 1.55; }
 
