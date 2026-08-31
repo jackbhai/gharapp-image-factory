@@ -79,7 +79,25 @@ def to_jpeg(raw):
     buf = BytesIO(); im.save(buf, "JPEG", quality=88, optimize=True)
     return buf.getvalue()
 
+def work(it, rules):
+    p = prompt_for(it, rules)
+    raw = None
+    try: raw = via_pollinations(p)
+    except requests.RequestException: raw = None
+    if not raw:
+        time.sleep(1)
+        try: raw = via_pollinations(p)
+        except requests.RequestException: raw = None
+    if not raw: raw = via_pixelster(p)
+    if not raw: return it["id"], False
+    try:
+        return it["id"], upload(it["id"], to_jpeg(raw))
+    except Exception as e:
+        print("ERR", it["id"], str(e)[:80], flush=True)
+        return it["id"], False
+
 def main():
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     items = json.load(open(SEED_PATH))["items"]
     rules = load_rules()
     done = done_ids()
@@ -87,32 +105,19 @@ def main():
     print(f"GH-AI | TOTAL {len(items)} | HAVE {len(done)} | GEN {len(pending)}", flush=True)
     gen = fail = processed = 0
     t0 = time.time()
-    for it in pending:
-        processed += 1
-        raw = None
-        p = prompt_for(it, rules)
-        try: raw = via_pollinations(p)
-        except requests.RequestException: raw = None
-        if not raw:
-            time.sleep(1)
-            try: raw = via_pollinations(p)
-            except requests.RequestException: raw = None
-        if not raw: raw = via_pixelster(p)
-        if raw:
-            try:
-                if upload(it["id"], to_jpeg(raw)): gen += 1
+    from threading import Lock
+    lock = Lock()
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futs = {ex.submit(work, it, rules): it for it in pending}
+        for fut in as_completed(futs):
+            _, ok = fut.result()
+            with lock:
+                processed += 1
+                if ok: gen += 1
                 else: fail += 1
-            except Exception as e:
-                fail += 1; print("ERR", it["id"], str(e)[:80], flush=True)
-        else:
-            fail += 1
-        if processed % 20 == 0:
-            el = time.time() - t0
-            print(f"[{processed}/{len(pending)}] gen={gen} fail={fail} {el/processed:.2f}s/it ETA={(len(pending)-processed)*(el/processed)/60:.0f}m", flush=True)
-        if processed % 100 == 0:
-            try:
-                done |= done_ids()
-            except Exception: pass
+                if processed % 20 == 0:
+                    el = time.time() - t0
+                    print(f"[{processed}/{len(pending)}] gen={gen} fail={fail} {el/processed:.2f}s/it ETA={(len(pending)-processed)*(el/processed)/60:.0f}m", flush=True)
     print(f"GH-AI FINISHED gen={gen} fail={fail}", flush=True)
 
 if __name__ == "__main__":
