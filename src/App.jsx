@@ -20,7 +20,7 @@ const DEFAULT_SETTINGS = {
   imgbbKey: '',
   workers: 12, autoRounds: 3,
   onlineOn: true, aiOnly: false, minScore: 0.5, minDim: 380,
-  srcBB: true, bbWorker: '',
+  srcBB: false, bbWorker: '',
   srcCommons: true, srcWiki: true, srcMeal: true, srcOpenverse: true, srcOff: false,
   srcPexels: false, pexelsKey: '',
   srcPixabay: false, pixabayKey: '',
@@ -371,8 +371,8 @@ export default function App() {
                 <h3>🧠 Pipeline — QUALITY first</h3>
                 <label className="switch"><input type="checkbox" checked={settings.onlineOn} onChange={(e) => setS('onlineOn', e.target.checked)} /><span>🌐 Online real-photo search (dimension-gate ke saath)</span></label>
                 <div className="srcToggles">
-                  <label className="switch sm bb"><input type="checkbox" checked={settings.srcBB} onChange={(e) => setS('srcBB', e.target.checked)} /><span><b>🛒 BigBasket</b> (scraped — clean studio shots, exact match!)</span></label>
-                  {settings.srcBB && <Field label="BigBasket worker URL" value={settings.bbWorker} onChange={(v) => setS('bbWorker', v)} ph="https://bbimg.<subdomain>.workers.dev — deploy 2 min (README)" />}
+                  <label className="switch sm bb"><input type="checkbox" checked={settings.srcBB} onChange={(e) => setS('srcBB', e.target.checked)} /><span>🛒 BigBasket <b>(OPTIONAL — bina iske bhi chalega; server-scrape alag se chal raha hai)</b></span></label>
+                  {settings.srcBB && <Field label="BigBasket worker URL (khaali chhod sakte ho)" value={settings.bbWorker} onChange={(v) => setS('bbWorker', v)} ph="optional — kabhi Cloudflare worker banao tab" />}
                   <label className="switch sm"><input type="checkbox" checked={settings.srcCommons} onChange={(e) => setS('srcCommons', e.target.checked)} /><span>Wikimedia Commons</span></label>
                   <label className="switch sm"><input type="checkbox" checked={settings.srcWiki} onChange={(e) => setS('srcWiki', e.target.checked)} /><span>Wikipedia</span></label>
                   <label className="switch sm"><input type="checkbox" checked={settings.srcMeal} onChange={(e) => setS('srcMeal', e.target.checked)} /><span>TheMealDB (cooked dishes)</span></label>
@@ -392,7 +392,7 @@ export default function App() {
                   <input type="range" min="300" max="600" step="20" value={settings.minDim} onChange={(e) => setS('minDim', +e.target.value)} />
                 </div>
                 <label className="switch"><input type="checkbox" checked={settings.aiOnly} onChange={(e) => setS('aiOnly', e.target.checked)} /><span>🎨 Sirf AI generation (online search skip)</span></label>
-                <p className="note">🛒 <b>BigBasket scraping</b> Cloudflare Worker se chalti hai (browser direct nahi, worker se session banake). Worker code: <code>worker/bbimg.js</code> repo me — 2 min deploy (README steps), URL upar paste karo. Free 1 lakh req/day.</p>
+                <p className="note">ℹ️ BigBasket images ka kaam <b>server-side GitHub Actions se alag se chal raha hai</b> — app me BigBasket toggle/URL <b>bilkul optional</b> hai. Baaki items Commons/Wiki/MealDB se aayenge, na mile to AI banayega.</p>
               </div>
             </div>
             <div className="rowCtrls">
