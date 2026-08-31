@@ -52,8 +52,10 @@ def prompt_for(item, rules):
     d = ""
     for rx, desc in rules:
         if rx.search(name): d = desc; break
-    return (f"Professional food photography of {name}, {d}".strip().strip(",")
-            + ", centered single serving on clean plate, appetizing, natural daylight, high detail, realistic, Indian kitchen context")
+    subject = (d or name)
+    return (f"Studio food photograph of {subject} ({name}), single serving on a plain ceramic plate, "
+            "seamless white background, soft natural daylight, sharp focus on the food, appetizing, "
+            "ultra realistic, professional food photography, close-up, no people, no hands, no text, no kitchen")
 
 def via_pollinations(prompt):
     u = ("https://image.pollinations.ai/prompt/" + requests.utils.quote(prompt[:400])
@@ -102,7 +104,9 @@ def main():
     rules = load_rules()
     done = done_ids()
     pending = [it for it in reversed(items) if it["id"] not in done]   # REVERSED
-    print(f"GH-AI | TOTAL {len(items)} | HAVE {len(done)} | GEN {len(pending)}", flush=True)
+    SHARD = int(os.environ.get("SHARD", "0")); NSHARDS = int(os.environ.get("NSHARDS", "1"))
+    pending = [it for i, it in enumerate(pending) if i % NSHARDS == SHARD]
+    print(f"GH-AI shard{SHARD}/{NSHARDS} | TOTAL {len(items)} | HAVE {len(done)} | GEN {len(pending)}", flush=True)
     gen = fail = processed = 0
     t0 = time.time()
     from threading import Lock
